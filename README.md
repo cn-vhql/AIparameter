@@ -1,4 +1,4 @@
-# 📈 AIPARAMETER 股票指标参数优化与回测系统
+# 📈 AIparameter 股票指标参数优化与回测系统
 
 一个基于Python的股票技术指标参数优化与历史回测系统，通过算法搜索最优参数组合，辅助确定股票交易策略的最佳参数配置。
 
@@ -20,6 +20,11 @@
 - **优化算法**: scikit-learn, DEAP
 - **前端框架**: Streamlit
 - **可视化**: Plotly, Matplotlib
+
+## 🔧 应用截图
+
+![alt text](/png/image.png)
+![alt text](/png/image-1.png)
 
 ## 📦 安装依赖
 
