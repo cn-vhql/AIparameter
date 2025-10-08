@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile indicators/technical_indicators.py)",
+      "Bash(python -m py_compile data/data_fetcher.py)",
+      "Bash(python -m py_compile backtest/backtest_engine.py)",
+      "Bash(python:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

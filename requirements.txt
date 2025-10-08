@@ -1,0 +1,25 @@
+# Core dependencies
+streamlit
+pandas
+numpy
+matplotlib
+plotly
+
+# Data acquisition
+akshare
+
+# Technical analysis
+TA-Lib
+ta
+
+# Optimization algorithms
+scikit-learn
+deap
+joblib
+
+# Performance metrics
+empyrical
+
+# Utilities
+tqdm
+python-dotenv
