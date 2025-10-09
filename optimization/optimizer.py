@@ -267,7 +267,8 @@ class ParameterOptimizer:
                                       param_ranges: Dict[str, List] = None,
                                       population_size: int = 20,
                                       generations: int = 5,
-                                      objective: str = "年化收益率") -> Tuple[Dict, pd.DataFrame]:
+                                      objective: str = "年化收益率",
+                                      progress_callback: callable = None) -> Tuple[Dict, pd.DataFrame]:
         """
         简化版遗传算法优化（避免DEAP依赖）
         
@@ -318,6 +319,9 @@ class ParameterOptimizer:
         all_results = []
 
         for gen in range(generations):
+            # 报告进度
+            if progress_callback:
+                progress_callback(gen + 1, generations)
             # 评估适应度
             fitness_scores = []
             for individual in population:
