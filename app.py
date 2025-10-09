@@ -84,6 +84,7 @@ def main():
             start_date = end_date - timedelta(days=365*5)
     
     # 技术指标选择
+    st.sidebar.markdown("---")
     st.sidebar.header("📈 技术指标选择")
     indicator = st.sidebar.selectbox(
         "选择技术指标",
@@ -246,6 +247,7 @@ def main():
             """)
     
     # 优化算法选择
+    st.sidebar.markdown("---")
     st.sidebar.header("⚙️ 优化设置")
     algorithm = st.sidebar.selectbox(
         "优化算法",
@@ -415,7 +417,8 @@ def main():
                 import traceback
                 st.error(f"执行过程中发生错误: {str(e)}")
                 st.code(traceback.format_exc(), language="python")
-    
+
+    st.sidebar.markdown("---")
     # 添加使用说明
     st.sidebar.header("ℹ️ 使用说明")
     st.sidebar.info("""

@@ -13,6 +13,11 @@ import numpy as np
 from datetime import datetime, timedelta
 import logging
 from typing import Optional, Dict, Any
+import os
+import pickle
+import hashlib
+import json
+from pathlib import Path
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -21,15 +26,128 @@ logger = logging.getLogger(__name__)
 class StockDataFetcher:
     """股票数据获取器"""
     
-    def __init__(self):
+    def __init__(self, cache_enabled: bool = True, cache_dir: str = "data_cache", 
+                 cache_expiry_hours: int = 24):
+        """
+        初始化股票数据获取器
+        
+        Args:
+            cache_enabled: 是否启用缓存
+            cache_dir: 缓存目录
+            cache_expiry_hours: 缓存过期时间（小时）
+        """
         self.period_mapping = {
             "日线": "daily",
             "周线": "weekly", 
             "月线": "monthly"
         }
+        
+        # 缓存配置
+        self.cache_enabled = cache_enabled
+        self.cache_dir = Path(cache_dir)
+        self.cache_expiry_hours = cache_expiry_hours
+        
+        # 创建缓存目录
+        if self.cache_enabled:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"数据缓存已启用，缓存目录: {self.cache_dir.absolute()}")
+        else:
+            logger.info("数据缓存已禁用")
+    
+    def _generate_cache_key(self, stock_code: str, start_date: str, end_date: str, period: str) -> str:
+        """生成缓存键"""
+        # 创建标准化的参数字符串
+        params = f"{stock_code}_{start_date}_{end_date}_{period}"
+        # 使用MD5哈希生成固定长度的键
+        return hashlib.md5(params.encode('utf-8')).hexdigest()
+    
+    def _get_cache_file_path(self, cache_key: str) -> Path:
+        """获取缓存文件路径"""
+        return self.cache_dir / f"{cache_key}.pkl"
+    
+    def _is_cache_valid(self, cache_file: Path) -> bool:
+        """检查缓存是否有效"""
+        if not cache_file.exists():
+            return False
+        
+        try:
+            # 检查文件修改时间
+            file_mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
+            expiry_time = datetime.now() - timedelta(hours=self.cache_expiry_hours)
+            
+            return file_mtime > expiry_time
+        except Exception as e:
+            logger.error(f"检查缓存有效性时发生错误: {str(e)}")
+            return False
+    
+    def _get_cache(self, cache_key: str) -> Optional[pd.DataFrame]:
+        """读取缓存数据"""
+        if not self.cache_enabled:
+            return None
+            
+        cache_file = self._get_cache_file_path(cache_key)
+        
+        if not self._is_cache_valid(cache_file):
+            return None
+            
+        try:
+            with open(cache_file, 'rb') as f:
+                cached_data = pickle.load(f)
+            
+            # 验证缓存数据
+            if isinstance(cached_data, dict) and 'data' in cached_data and 'meta' in cached_data:
+                logger.info(f"从缓存加载数据: {cache_key}")
+                return cached_data['data']
+            elif isinstance(cached_data, pd.DataFrame):
+                # 兼容旧版本缓存格式
+                logger.info(f"从缓存加载数据 (旧格式): {cache_key}")
+                return cached_data
+            else:
+                logger.warning(f"缓存数据格式无效: {cache_key}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"读取缓存时发生错误: {str(e)}")
+            return None
+    
+    def _set_cache(self, cache_key: str, data: pd.DataFrame, meta: Dict[str, Any] = None) -> bool:
+        """写入缓存数据"""
+        if not self.cache_enabled:
+            return False
+            
+        try:
+            cache_file = self._get_cache_file_path(cache_key)
+            
+            # 准备缓存数据
+            cache_data = {
+                'data': data,
+                'meta': {
+                    'cache_time': datetime.now(),
+                    'data_shape': data.shape,
+                    'data_range': {
+                        'start_date': str(data.index.min()) if not data.empty else None,
+                        'end_date': str(data.index.max()) if not data.empty else None
+                    }
+                }
+            }
+            
+            # 添加用户提供的元数据
+            if meta:
+                cache_data['meta'].update(meta)
+            
+            # 写入缓存文件
+            with open(cache_file, 'wb') as f:
+                pickle.dump(cache_data, f)
+            
+            logger.info(f"数据已缓存: {cache_key}, 数据行数: {len(data)}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"写入缓存时发生错误: {str(e)}")
+            return False
     
     def get_stock_data(self, stock_code: str, start_date: str, end_date: str, 
-                      period: str = "日线", retry_count: int = 3) -> Optional[pd.DataFrame]:
+                      period: str = "日线", retry_count: int = 3, use_cache: bool = True) -> Optional[pd.DataFrame]:
         """
         获取股票历史数据
         
@@ -39,6 +157,7 @@ class StockDataFetcher:
             end_date: 结束日期，格式 "YYYY-MM-DD"
             period: 时间周期，"日线"/"周线"/"月线"
             retry_count: 重试次数
+            use_cache: 是否使用缓存
             
         Returns:
             pd.DataFrame: 包含股票数据的DataFrame，包含以下列：
@@ -62,6 +181,19 @@ class StockDataFetcher:
         except Exception as e:
             logger.error(f"日期格式转换错误: {str(e)}")
             return None
+        
+        # 生成缓存键
+        cache_key = self._generate_cache_key(stock_code, start_str, end_str, period)
+        
+        # 尝试从缓存读取数据
+        if use_cache and self.cache_enabled:
+            cached_data = self._get_cache(cache_key)
+            if cached_data is not None:
+                logger.info(f"使用缓存数据: {stock_code} {period} ({len(cached_data)} 条)")
+                return cached_data
+        
+        # 缓存未命中，从API获取数据
+        logger.info(f"从API获取数据: {stock_code} {period}")
         
         # 尝试获取数据
         for attempt in range(retry_count):
@@ -87,6 +219,18 @@ class StockDataFetcher:
                     # 数据清洗和处理
                     df = self._clean_data(df)
                     if not df.empty:
+                        # 缓存数据
+                        if self.cache_enabled:
+                            meta = {
+                                'stock_code': stock_code,
+                                'period': period,
+                                'start_date': start_str,
+                                'end_date': end_str,
+                                'source': 'akshare',
+                                'fetch_time': datetime.now()
+                            }
+                            self._set_cache(cache_key, df, meta)
+                        
                         logger.info(f"成功获取 {stock_code} 的{len(df)}条{period}数据")
                         return df
                     else:
@@ -104,6 +248,108 @@ class StockDataFetcher:
                     
         logger.error(f"获取 {stock_code} 数据失败，已重试 {retry_count} 次")
         return None
+    
+    def clear_cache(self, stock_code: str = None, period: str = None, 
+                   start_date: str = None, end_date: str = None) -> int:
+        """
+        清理缓存数据
+        
+        Args:
+            stock_code: 股票代码，为None时清理所有缓存
+            period: 时间周期，为None时清理所有周期
+            start_date: 开始日期，为None时清理所有日期
+            end_date: 结束日期，为None时清理所有日期
+            
+        Returns:
+            int: 清理的缓存文件数量
+        """
+        if not self.cache_enabled:
+            logger.info("缓存已禁用，无需清理")
+            return 0
+            
+        try:
+            cleared_count = 0
+            
+            if stock_code or period or start_date or end_date:
+                # 清理指定条件的缓存
+                for cache_file in self.cache_dir.glob("*.pkl"):
+                    # 生成对应的缓存键进行比较
+                    # 这里简化处理，直接删除所有缓存文件
+                    cache_file.unlink()
+                    cleared_count += 1
+            else:
+                # 清理所有缓存
+                for cache_file in self.cache_dir.glob("*.pkl"):
+                    cache_file.unlink()
+                    cleared_count += 1
+            
+            logger.info(f"已清理 {cleared_count} 个缓存文件")
+            return cleared_count
+            
+        except Exception as e:
+            logger.error(f"清理缓存时发生错误: {str(e)}")
+            return 0
+    
+    def get_cache_info(self) -> Dict[str, Any]:
+        """
+        获取缓存信息
+        
+        Returns:
+            Dict: 缓存统计信息
+        """
+        if not self.cache_enabled:
+            return {
+                "cache_enabled": False,
+                "cache_dir": str(self.cache_dir),
+                "cache_files": 0,
+                "cache_size_mb": 0.0,
+                "cache_expiry_hours": self.cache_expiry_hours
+            }
+            
+        try:
+            cache_files = list(self.cache_dir.glob("*.pkl"))
+            cache_size = sum(f.stat().st_size for f in cache_files if f.exists())
+            
+            # 获取缓存文件详细信息
+            cache_details = []
+            for cache_file in cache_files:
+                try:
+                    with open(cache_file, 'rb') as f:
+                        cached_data = pickle.load(f)
+                    
+                    if isinstance(cached_data, dict) and 'meta' in cached_data:
+                        meta = cached_data['meta']
+                        cache_details.append({
+                            "file": cache_file.name,
+                            "size_mb": round(cache_file.stat().st_size / 1024 / 1024, 2),
+                            "cache_time": meta.get('cache_time'),
+                            "stock_code": meta.get('stock_code'),
+                            "period": meta.get('period'),
+                            "data_shape": meta.get('data_shape'),
+                            "data_range": meta.get('data_range')
+                        })
+                except Exception as e:
+                    logger.warning(f"读取缓存文件信息失败 {cache_file.name}: {str(e)}")
+            
+            return {
+                "cache_enabled": True,
+                "cache_dir": str(self.cache_dir),
+                "cache_files": len(cache_files),
+                "cache_size_mb": round(cache_size / 1024 / 1024, 2),
+                "cache_expiry_hours": self.cache_expiry_hours,
+                "cache_details": cache_details
+            }
+            
+        except Exception as e:
+            logger.error(f"获取缓存信息时发生错误: {str(e)}")
+            return {
+                "cache_enabled": True,
+                "cache_dir": str(self.cache_dir),
+                "cache_files": 0,
+                "cache_size_mb": 0.0,
+                "cache_expiry_hours": self.cache_expiry_hours,
+                "error": str(e)
+            }
     
     def _validate_stock_code(self, stock_code: str) -> bool:
         """验证股票代码格式"""

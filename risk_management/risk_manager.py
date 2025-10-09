@@ -308,6 +308,117 @@ class RiskManager:
         self.daily_pnl = 0.0
         logger.info("已重置每日风险指标")
     
+    def assess_risk_level(self, available_cash: float, buy_quantity: float, 
+                         current_price: float) -> str:
+        """
+        评估风险等级
+        
+        Args:
+            available_cash: 可用资金
+            buy_quantity: 买入数量
+            current_price: 当前价格
+            
+        Returns:
+            str: 风险等级
+        """
+        try:
+            # 计算投资金额
+            investment_amount = buy_quantity * current_price
+            investment_ratio = investment_amount / available_cash if available_cash > 0 else 0
+            
+            # 计算潜在风险
+            risk_pct = investment_ratio * self.max_loss_per_trade
+            
+            # 评估风险等级
+            if risk_pct < 0.01:
+                return "低风险"
+            elif risk_pct < 0.02:
+                return "中等风险"
+            elif risk_pct < 0.03:
+                return "高风险"
+            else:
+                return "极高风险"
+                
+        except Exception as e:
+            logger.error(f"评估风险等级时发生错误: {str(e)}")
+            return "未知风险"
+    
+    def check_violation(self, current_equity: float, initial_capital: float) -> bool:
+        """
+        检查风险违规
+        
+        Args:
+            current_equity: 当前权益
+            initial_capital: 初始资金
+            
+        Returns:
+            bool: 是否存在风险违规
+        """
+        try:
+            # 计算当前亏损比例
+            if initial_capital > 0:
+                loss_pct = (initial_capital - current_equity) / initial_capital
+            else:
+                loss_pct = 0
+            
+            # 检查各项风险限制
+            violations = []
+            
+            # 检查最大亏损限制
+            if loss_pct > self.max_loss_per_trade * 5:  # 单笔交易5倍限制
+                violations.append("单笔交易亏损超限")
+            
+            # 检查最大回撤限制
+            if loss_pct > self.max_drawdown:
+                violations.append("回撤超限")
+            
+            # 检查每日亏损限制
+            if abs(self.daily_pnl) > initial_capital * self.max_daily_loss * 3:  # 3倍限制
+                violations.append("每日亏损超限")
+            
+            # 记录违规
+            if violations:
+                for violation in violations:
+                    self.risk_violations.append({
+                        'type': violation,
+                        'current': loss_pct,
+                        'limit': self.max_drawdown,
+                        'equity': current_equity,
+                        'timestamp': pd.Timestamp.now()
+                    })
+                logger.warning(f"检测到风险违规: {', '.join(violations)}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"检查风险违规时发生错误: {str(e)}")
+            return False
+    
+    def calculate_risk_reward_ratio(self, entry_price: float, stop_loss_price: float) -> float:
+        """
+        计算风险回报比
+        
+        Args:
+            entry_price: 入场价格
+            stop_loss_price: 止损价格
+            
+        Returns:
+            float: 风险回报比
+        """
+        try:
+            risk_amount = abs(entry_price - stop_loss_price)
+            reward_amount = entry_price * self.take_profit_pct
+            
+            if risk_amount > 0:
+                return reward_amount / risk_amount
+            else:
+                return 0.0
+                
+        except Exception as e:
+            logger.error(f"计算风险回报比时发生错误: {str(e)}")
+            return 0.0
+    
     def adjust_risk_parameters(self, market_volatility: float):
         """
         根据市场波动率调整风险参数
