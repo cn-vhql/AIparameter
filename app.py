@@ -16,21 +16,19 @@ from plotly.subplots import make_subplots
 import sys
 import os
 
-# 添加项目根目录到Python路径
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 导入项目工具类并初始化
+from utils.project_utils import ProjectUtils
+ProjectUtils.setup_project_path()
+ProjectUtils.setup_logging()
 
 # 导入自定义模块
-try:
-    from data.data_fetcher import StockDataFetcher
-    from indicators.technical_indicators import TechnicalIndicators
-    from backtest.backtest_engine import BacktestEngine
-    from optimization.optimizer import ParameterOptimizer
-except ImportError:
-    # 如果直接运行，尝试相对导入
-    from .data.data_fetcher import StockDataFetcher
-    from .indicators.technical_indicators import TechnicalIndicators
-    from .backtest.backtest_engine import BacktestEngine
-    from .optimization.optimizer import ParameterOptimizer
+from data.data_fetcher import StockDataFetcher
+from indicators.technical_indicators import TechnicalIndicators
+from backtest.backtest_engine import BacktestEngine
+from optimization.optimizer import ParameterOptimizer
+
+# 加载配置
+config = ProjectUtils.load_config()
 
 # 页面配置
 st.set_page_config(
@@ -89,7 +87,8 @@ def main():
     st.sidebar.header("📈 技术指标选择")
     indicator = st.sidebar.selectbox(
         "选择技术指标",
-        options=["MACD", "RSI", "KDJ", "布林带", "均线", "乖离率"],
+        options=["MACD", "RSI", "KDJ", "布林带", "均线", "乖离率", 
+                "ATR", "OBV", "威廉指标", "CCI", "ADX", "动量指标", "抛物线SAR"],
         index=0
     )
 
@@ -141,13 +140,110 @@ def main():
         - **卖出信号**：乖离率 > 6%（价格过度偏离均线向上）
         - **参数说明**：移动平均周期
         - **适用场景**：识别价格回归机会，逆势操作
+        """,
+
+        "ATR": """
+        **ATR指标交易规则：**
+        - **买入信号**：无直接买入信号（主要辅助其他指标）
+        - **卖出信号**：无直接卖出信号（主要辅助其他指标）
+        - **参数说明**：平均真实波幅计算周期，默认14天
+        - **适用场景**：波动率分析，为仓位管理和止损提供参考
+        """,
+
+        "OBV": """
+        **OBV指标交易规则：**
+        - **买入信号**：OBV连续上升且突破近期高点（资金持续流入）
+        - **卖出信号**：OBV连续下降且跌破近期低点（资金持续流出）
+        - **参数说明**：无参数，基于成交量和价格累积计算
+        - **适用场景**：成交量确认，识别资金流向和趋势持续性
+        """,
+
+        "威廉指标": """
+        **威廉指标交易规则：**
+        - **买入信号**：威廉指标 < -80（超卖区域，反弹机会）
+        - **卖出信号**：威廉指标 > -20（超买区域，回调风险）
+        - **参数说明**：计算周期，默认14天
+        - **适用场景**：超买超卖判断，识别短期反转机会
+        """,
+
+        "CCI": """
+        **CCI指标交易规则：**
+        - **买入信号**：CCI < -100（超卖区域，价格偏离均值过大）
+        - **卖出信号**：CCI > 100（超买区域，价格偏离均值过大）
+        - **参数说明**：商品通道指数计算周期，默认20天
+        - **适用场景**：周期性商品分析，识别价格偏离常态的程度
+        """,
+
+        "ADX": """
+        **ADX指标交易规则：**
+        - **买入信号**：无直接买入信号（仅判断趋势强度）
+        - **卖出信号**：无直接卖出信号（仅判断趋势强度）
+        - **参数说明**：平均方向指数计算周期，默认14天
+        - **适用场景**：趋势强度判断，配合其他指标确认交易时机
+        """,
+
+        "动量指标": """
+        **动量指标交易规则：**
+        - **买入信号**：动量指标上穿零轴（价格开始加速上涨）
+        - **卖出信号**：动量指标下穿零轴（价格开始加速下跌）
+        - **参数说明**：动量计算周期，默认10天
+        - **适用场景**：趋势动量分析，识别价格加速变化的时机
+        """,
+
+        "抛物线SAR": """
+        **抛物线SAR指标交易规则：**
+        - **买入信号**：价格上穿SAR线（趋势转强，买入确认）
+        - **卖出信号**：价格下穿SAR线（趋势转弱，卖出确认）
+        - **参数说明**：加速因子0.02，最大值0.2
+        - **适用场景**：趋势跟踪止损，动态调整止损止盈点位
         """
     }
 
     # 显示技术指标说明
+    with st.sidebar.expander("📋 指标使用说明", expanded=False):
+        st.markdown(indicator_descriptions.get(indicator, "选择一个指标查看使用说明"))
+    
+    # 风险控制设置
     st.sidebar.markdown("---")
-    st.sidebar.markdown("📋 **指标使用说明**")
-    st.sidebar.info(indicator_descriptions.get(indicator, "选择一个指标查看使用说明"))
+    st.sidebar.header("🛡️ 风险控制设置")
+    enable_risk_management = st.sidebar.checkbox(
+        "启用风险控制",
+        value=True,
+        help="开启后将应用智能仓位管理、止损止盈等风险控制策略"
+    )
+    
+    # 风险控制说明提示框
+    if enable_risk_management:
+        with st.sidebar.expander("📋 风险控制说明", expanded=False):
+            st.markdown("""
+            **🛡️ 风险控制功能说明：**
+            
+            **1. 智能仓位管理**
+            - 基于风险暴露计算最优仓位大小
+            - 高风险交易自动减半仓位保护资本
+            - 实时评估交易风险等级
+            
+            **2. 自动止损止盈**
+            - 止损：价格跌破买入价5%时自动卖出
+            - 止盈：价格达到预期收益目标时自动卖出
+            - 风险回报比：基于风险调整卖出决策
+            
+            **3. 风险等级评估**
+            - 低风险：正常仓位，标准交易策略
+            - 中风险：适当调整仓位，谨慎交易
+            - 高风险：减少仓位，降低风险暴露
+            - 极高风险：大幅减仓，保护本金安全
+            
+            **4. 交易记录增强**
+            - 详细记录风险等级和决策原因
+            - 监控风险违规情况
+            - 提供完整的风险控制日志
+            
+            **⚠️ 注意事项：**
+            - 风险控制可能减少交易频率但提高安全性
+            - 建议新手投资者开启风险控制
+            - 可根据个人风险偏好调整设置
+            """)
     
     # 优化算法选择
     st.sidebar.header("⚙️ 优化设置")
@@ -158,56 +254,167 @@ def main():
     )
     
     # 参数范围设置（根据选择的指标动态显示）
+    st.sidebar.markdown("---")
     st.sidebar.header("🔧 参数范围设置")
     
-    if indicator == "MACD":
-        fast_period_min = st.sidebar.slider("Fast Period 最小值", 5, 20, 8)
-        fast_period_max = st.sidebar.slider("Fast Period 最大值", 10, 40, 15)
-        slow_period_min = st.sidebar.slider("Slow Period 最小值", 15, 40, 20)
-        slow_period_max = st.sidebar.slider("Slow Period 最大值", 20, 60, 30)
-        signal_period_min = st.sidebar.slider("Signal Period 最小值", 3, 10, 5)
-        signal_period_max = st.sidebar.slider("Signal Period 最大值", 8, 20, 12)
+    from config import INDICATOR_PARAMS
+    
+    param_ranges = {}
+    indicator_params = INDICATOR_PARAMS.get(indicator, {})
+    
+    for param_name, param_config in indicator_params.items():
+        col1, col2 = st.sidebar.columns(2)
+        with col1:
+            min_value = st.slider(
+                f"{param_name} 最小值",
+                min_value=param_config["min"],
+                max_value=param_config["max"],
+                value=param_config["default"],
+                key=f"{param_name}_min"
+            )
+        with col2:
+            max_value = st.slider(
+                f"{param_name} 最大值",
+                min_value=param_config["min"],
+                max_value=param_config["max"],
+                value=param_config["max"],
+                key=f"{param_name}_max"
+            )
+            
+        # 验证参数范围的合理性
+        if min_value >= max_value:
+            st.sidebar.error(f"{param_name} 的最小值不能大于或等于最大值")
+            param_ranges = {}
+            break
+            
+        param_ranges[param_name] = (min_value, max_value)
         
-    elif indicator == "RSI":
-        rsi_period_min = st.sidebar.slider("RSI Period 最小值", 5, 10, 6)
-        rsi_period_max = st.sidebar.slider("RSI Period 最大值", 12, 30, 20)
+    # MACD特殊处理：验证快慢线周期
+    if indicator == "MACD" and param_ranges:
+        if param_ranges["fast_period"][1] >= param_ranges["slow_period"][0]:
+            st.sidebar.error("快线周期不能大于或等于慢线周期")
+            param_ranges = {}
         
     # 添加其他指标的参数设置...
     
     # 开始优化按钮
     if st.sidebar.button("🚀 开始参数优化", type="primary"):
-        with st.spinner("正在获取数据并执行优化..."):
+        if not param_ranges:
+            st.error("请正确设置参数范围")
+            return
+            
+        # 创建进度条容器
+        progress_container = st.empty()
+        results_container = st.container()
+        
+        with st.spinner("正在获取数据..."):
             try:
                 # 获取股票数据
                 fetcher = StockDataFetcher()
                 df = fetcher.get_stock_data(stock_code, start_date, end_date, period)
                 
                 if df is not None and len(df) > 0:
-                    st.success(f"成功获取 {stock_code} 的{len(df)}条数据")
+                    progress_container.success(f"成功获取 {stock_code} 的{len(df)}条数据")
                     
-                    # 显示数据预览
-                    st.subheader("📊 数据预览")
-                    st.dataframe(df.tail(10))
-                    
-                    # 执行参数优化
-                    optimizer = ParameterOptimizer()
-                    best_params, results_df = optimizer.optimize_parameters(
-                        df, indicator, algorithm
-                    )
-                    
-                    # 显示优化结果
-                    st.subheader("🎯 最优参数组合")
-                    st.write(best_params)
-                    
-                    # 显示所有参数组合结果
-                    st.subheader("📋 所有参数组合绩效")
-                    st.dataframe(results_df.sort_values("年化收益率", ascending=False))
-                    
+                    with results_container:
+                        # 显示数据预览
+                        st.subheader("📊 数据预览")
+                        fig = go.Figure(data=[
+                            go.Candlestick(
+                                x=df.index,
+                                open=df['open'],
+                                high=df['high'],
+                                low=df['low'],
+                                close=df['close']
+                            )
+                        ])
+                        fig.update_layout(title=f"{stock_code} 行情走势")
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        with st.spinner("正在执行参数优化..."):
+                            # 执行参数优化
+                            optimizer = ParameterOptimizer()
+                            
+                            # 创建优化进度容器
+                            progress_container = st.empty()
+                            progress_text = st.empty()
+                            
+                            def progress_callback(current, total):
+                                progress = int(current / total * 100)
+                                progress_container.progress(progress / 100)
+                                progress_text.text(f"参数优化进度: {progress}% ({current}/{total} 组合)")
+                            
+                            best_params, results_df = optimizer.optimize_parameters(
+                                df, indicator, algorithm,
+                                param_ranges=param_ranges,
+                                progress_callback=progress_callback
+                            )
+                            
+                            # 清除进度显示
+                            progress_container.empty()
+                            progress_text.empty()
+                            
+                            if best_params and not results_df.empty:
+                                # 清除进度显示（使用已创建的容器）
+                                progress_container.empty()
+                                progress_text.empty()
+                                
+                                # 显示风险控制状态
+                                if enable_risk_management:
+                                    st.success("🛡️ 风险控制已启用")
+                                else:
+                                    st.info("📊 风险控制已禁用")
+                                
+                                # 显示优化结果
+                                st.subheader("🎯 最优参数组合")
+                                st.json(best_params)
+                                
+                                # 创建回测引擎（传递风险控制设置）
+                                engine = BacktestEngine(enable_risk_management=enable_risk_management)
+                                
+                                # 使用最优参数运行完整回测
+                                full_results = engine.run_backtest(df, 'signal', 'close', return_full=True)
+                                
+                                # 显示回测曲线
+                                st.subheader("📈 最优参数回测曲线")
+                                if full_results and 'equity_curve' in full_results:
+                                    equity_curve_df = pd.DataFrame(full_results['equity_curve'])
+                                    equity_curve_df.set_index('date', inplace=True)
+                                    
+                                    fig = go.Figure()
+                                    fig.add_trace(go.Scatter(
+                                        x=equity_curve_df.index,
+                                        y=equity_curve_df['equity'],
+                                        name="策略收益"
+                                    ))
+                                    if 'benchmark' in equity_curve_df.columns:
+                                        fig.add_trace(go.Scatter(
+                                            x=equity_curve_df.index,
+                                            y=equity_curve_df['benchmark'],
+                                            name="基准收益"
+                                        ))
+                                    fig.update_layout(title="策略收益vs基准收益")
+                                    st.plotly_chart(fig, use_container_width=True)
+                                
+                                # 显示所有参数组合结果
+                                st.subheader("📋 参数优化结果")
+                                st.dataframe(
+                                    results_df.sort_values("年化收益率", ascending=False)
+                                    .style.format({
+                                        "年化收益率": "{:.2%}",
+                                        "最大回撤": "{:.2%}",
+                                        "夏普比率": "{:.2f}"
+                                    })
+                                )
+                            else:
+                                st.error("优化过程未能找到有效的参数组合")
                 else:
                     st.error("获取数据失败，请检查股票代码是否正确")
                     
             except Exception as e:
+                import traceback
                 st.error(f"执行过程中发生错误: {str(e)}")
+                st.code(traceback.format_exc(), language="python")
     
     # 添加使用说明
     st.sidebar.header("ℹ️ 使用说明")

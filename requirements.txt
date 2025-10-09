@@ -20,6 +20,12 @@ joblib
 # Performance metrics
 empyrical
 
+# Risk management
+scipy
+
 # Utilities
 tqdm
 python-dotenv
+
+# Enhanced functionality
+concurrent-futures

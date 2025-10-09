@@ -14,7 +14,6 @@ from itertools import product
 from tqdm import tqdm
 from joblib import Parallel, delayed
 import random
-from deap import base, creator, tools, algorithms
 
 # 导入自定义模块
 from indicators.technical_indicators import TechnicalIndicators
@@ -37,6 +36,8 @@ class ParameterOptimizer:
         self.n_jobs = n_jobs
         self.indicator_calc = TechnicalIndicators()
         self.backtest_engine = BacktestEngine()
+        # 保存最优权益曲线（兼容前端调用）
+        self._best_equity_curve = None
     
     def optimize_parameters(self, df: pd.DataFrame, indicator_name: str, 
                           algorithm: str = "grid_search", **kwargs) -> Tuple[Dict, pd.DataFrame]:
@@ -56,17 +57,17 @@ class ParameterOptimizer:
         if algorithm in ["grid_search", "网格搜索"]:
             return self._grid_search_optimization(df, indicator_name, **kwargs)
         elif algorithm in ["genetic", "genetic_algorithm", "遗传算法"]:
-            # 使用简化版遗传算法
-            from .simple_optimizer import SimpleParameterOptimizer
-            simple_optimizer = SimpleParameterOptimizer(self.n_jobs)
-            return simple_optimizer._simple_genetic_optimization(df, indicator_name, **kwargs)
+            # 使用内置遗传算法
+            return self._genetic_algorithm_optimization(df, indicator_name, **kwargs)
         else:
             logger.error(f"不支持的优化算法: {algorithm}")
             return {}, pd.DataFrame()
     
     def _grid_search_optimization(self, df: pd.DataFrame, indicator_name: str,
                                 param_ranges: Dict[str, List] = None,
-                                objective: str = "年化收益率") -> Tuple[Dict, pd.DataFrame]:
+                                objective: str = "年化收益率",
+                                progress_callback: callable = None,
+                                **kwargs) -> Tuple[Dict, pd.DataFrame]:
         """
         网格搜索优化
         
@@ -75,26 +76,181 @@ class ParameterOptimizer:
             indicator_name: 指标名称
             param_ranges: 参数范围字典
             objective: 优化目标指标
+            progress_callback: 进度回调函数，接受当前进度和总数两个参数
+            **kwargs: 其他参数
             
         Returns:
             Tuple: (最优参数, 所有结果)
         """
-        # 获取默认参数范围
-        if param_ranges is None:
-            param_ranges = self._get_default_param_ranges(indicator_name)
+        try:
+            # 获取默认参数范围
+            if param_ranges is None:
+                param_ranges = self._get_default_param_ranges(indicator_name)
+            
+            # 生成所有参数组合
+            param_names = list(param_ranges.keys())
+            param_values = [list(range(start, end + 1)) for start, end in param_ranges.values()]
+            logger.info(f"参数范围: {dict(zip(param_names, param_values))}")
+            param_combinations = list(product(*param_values))
+            total_combinations = len(param_combinations)
+            
+            logger.info(f"开始网格搜索，共 {total_combinations} 种参数组合")
+            
+            def evaluate_single(params):
+                """评估单个参数组合"""
+                try:
+                    param_dict = dict(zip(param_names, params))
+                    df_copy = df.copy()
+
+                    # 计算技术指标
+                    df_with_indicator = self.indicator_calc.calculate_indicator(df_copy, indicator_name, param_dict)
+
+                    # 检查信号生成
+                    if 'signal' not in df_with_indicator.columns:
+                        logger.warning(f"参数 {param_dict} 未生成信号列")
+                        return None
+
+                    signal_count = (df_with_indicator['signal'] != 0).sum()
+                    if signal_count == 0:
+                        logger.debug(f"参数 {param_dict} 没有生成交易信号")
+                        # 返回空结果但不是None，以便统计
+                        empty_result = {
+                            '年化收益率': 0.0,
+                            '最大回撤': 0.0,
+                            '夏普比率': 0.0,
+                            '交易次数': 0,
+                            **param_dict
+                        }
+                        return empty_result
+
+                    # 执行回测
+                    results = self.backtest_engine.run_backtest(df_with_indicator)
+
+                    if isinstance(results, dict):
+                        results.update(param_dict)
+                        # 确保所有必要的指标都存在
+                        for key in ['年化收益率', '最大回撤', '夏普比率', '交易次数']:
+                            if key not in results:
+                                results[key] = 0.0
+                        return results
+                    else:
+                        logger.warning(f"参数 {param_dict} 回测结果格式异常")
+                        return None
+
+                except Exception as e:
+                    logger.warning(f"参数评估失败 {params}: {str(e)}")
+                    return None
+            
+            # 并行计算所有参数组合
+            results = []
+            processed = 0
+            batch_size = min(100, total_combinations)
+            
+            for i in range(0, total_combinations, batch_size):
+                batch = param_combinations[i:i + batch_size]
+                
+                try:
+                    batch_results = Parallel(n_jobs=self.n_jobs)(
+                        delayed(evaluate_single)(params)
+                        for params in batch
+                    )
+                    
+                    # 过滤有效结果
+                    valid_results = [r for r in batch_results if r is not None]
+                    results.extend(valid_results)
+                    
+                except Exception as batch_error:
+                    logger.error(f"批次处理错误: {str(batch_error)}")
+                    continue
+                finally:
+                    processed += len(batch)
+                    if progress_callback:
+                        progress_callback(processed, total_combinations)
+            
+            # 处理结果
+            if results:
+                results_df = pd.DataFrame(results)
+                
+                if not results_df.empty and objective in results_df.columns:
+                    # 按目标指标排序
+                    results_df = results_df.sort_values(objective, ascending=False)
+                    
+                    # 获取最优参数
+                    best_row = results_df.iloc[0]
+                    best_params = {param: best_row[param] for param in param_names}
+                    
+                    logger.info(f"找到最优参数组合: {best_params}")
+                    # 运行回测以获取最优权益曲线的完整结果并保存
+                    try:
+                        # 使用最优参数重新计算指标并请求完整回测结果
+                        df_with_indicator = self.indicator_calc.calculate_indicator(df.copy(), indicator_name, best_params)
+                        full_results = self.backtest_engine.run_backtest(df_with_indicator, return_full=True)
+                        equity_curve = None
+                        if isinstance(full_results, dict) and 'equity_curve' in full_results:
+                            equity_df = pd.DataFrame(full_results['equity_curve'])
+                            equity_df.set_index('date', inplace=True)
+                            # 添加基准（使用首个close不变的基准收益）
+                            if 'price' in equity_df.columns:
+                                equity_df['benchmark'] = equity_df['price'] / equity_df['price'].iloc[0] * self.backtest_engine.initial_capital
+                            else:
+                                equity_df['benchmark'] = np.nan
+                            equity_curve = equity_df
+                        self._best_equity_curve = equity_curve
+                    except Exception:
+                        self._best_equity_curve = None
+
+                    return best_params, results_df
+            
+            logger.error("未找到有效的优化结果")
+            return {}, pd.DataFrame()
+            
+        except Exception as e:
+            logger.error(f"优化过程发生错误: {str(e)}")
+            return {}, pd.DataFrame()
+        eval_data = []
+        for params in param_combinations:
+            param_dict = dict(zip(param_names, params))
+            eval_data.append((df.copy(), indicator_name, param_dict))
         
-        # 生成所有参数组合
-        param_names = list(param_ranges.keys())
-        param_values = list(param_ranges.values())
-        param_combinations = list(product(*param_values))
+        # 分批处理
+        batch_size = min(100, total_combinations)  # 减小批次大小，提高稳定性
+        results = []
+        processed = 0
         
-        logger.info(f"开始网格搜索，共 {len(param_combinations)} 种参数组合")
-        
-        # 并行计算所有参数组合的回测结果
-        results = Parallel(n_jobs=self.n_jobs)(
-            delayed(self._evaluate_parameters)(df, indicator_name, dict(zip(param_names, params)))
-            for params in tqdm(param_combinations, desc="网格搜索进度")
-        )
+        try:
+            for i in range(0, total_combinations, batch_size):
+                # 获取当前批次的数据
+                batch = eval_data[i:i + batch_size]
+                
+                try:
+                    # 并行计算当前批次
+                    batch_results = Parallel(n_jobs=self.n_jobs, verbose=0)(
+                        delayed(evaluate_parameters_wrapper)(data)
+                        for data in batch
+                    )
+                    
+                    # 过滤掉无效结果
+                    valid_results = [r for r in batch_results if r is not None and isinstance(r, dict)]
+                    results.extend(valid_results)
+                    
+                except Exception as batch_error:
+                    logger.error(f"批次处理错误（{i}/{total_combinations}）: {str(batch_error)}")
+                    continue
+                
+                finally:
+                    # 更新进度
+                    processed += len(batch)
+                    if progress_callback:
+                        progress_callback(processed, total_combinations)
+            
+            if not results:
+                logger.error("并行计算没有产生任何有效结果")
+                return {}, pd.DataFrame()
+        except Exception as e:
+            logger.error(f"并行计算过程中发生错误: {str(e)}")
+            if progress_callback:
+                progress_callback(total_combinations, total_combinations)  # 完成进度条
+            return {}, pd.DataFrame()
         
         # 转换为DataFrame
         results_df = pd.DataFrame(results)
@@ -108,21 +264,19 @@ class ParameterOptimizer:
             return {}, pd.DataFrame()
     
     def _genetic_algorithm_optimization(self, df: pd.DataFrame, indicator_name: str,
-                                      population_size: int = 50,
-                                      generations: int = 10,
-                                      cx_prob: float = 0.5,
-                                      mut_prob: float = 0.2,
+                                      param_ranges: Dict[str, List] = None,
+                                      population_size: int = 20,
+                                      generations: int = 5,
                                       objective: str = "年化收益率") -> Tuple[Dict, pd.DataFrame]:
         """
-        遗传算法优化
+        简化版遗传算法优化（避免DEAP依赖）
         
         Args:
             df: 股票数据
             indicator_name: 指标名称
+            param_ranges: 参数范围
             population_size: 种群大小
             generations: 进化代数
-            cx_prob: 交叉概率
-            mut_prob: 变异概率
             objective: 优化目标
             
         Returns:
@@ -132,88 +286,106 @@ class ParameterOptimizer:
         param_info = self.indicator_calc.get_indicator_info(indicator_name)
         if not param_info:
             return {}, pd.DataFrame()
-        
-        param_names = param_info["params"]
-        default_values = param_info["defaults"]
-        
-        # 创建遗传算法工具（清理可能存在的重复创建）
-        try:
-            del creator.FitnessMax
-        except AttributeError:
-            pass
-        try:
-            del creator.Individual
-        except AttributeError:
-            pass
 
-        creator.create("FitnessMax", base.Fitness, weights=(1.0,))
-        creator.create("Individual", list, fitness=creator.FitnessMax)
-        
-        toolbox = base.Toolbox()
-        
-        # 定义基因生成函数
-        for i, param_name in enumerate(param_names):
-            param_range = self._get_param_range(param_name, indicator_name)
-            toolbox.register(f"attr_{i}", random.randint, param_range[0], param_range[1])
-        
-        # 创建个体和种群
-        toolbox.register("individual", tools.initCycle, creator.Individual,
-                        [getattr(toolbox, f"attr_{i}") for i in range(len(param_names))], 1)
-        toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-        
-        # 注册遗传操作
-        toolbox.register("evaluate", self._evaluate_individual, df, indicator_name, param_names, objective)
-        toolbox.register("mate", tools.cxTwoPoint)
-        toolbox.register("mutate", tools.mutUniformInt, low=[self._get_param_range(name, indicator_name)[0] for name in param_names],
-                        up=[self._get_param_range(name, indicator_name)[1] for name in param_names], indpb=0.2)
-        toolbox.register("select", tools.selTournament, tournsize=3)
-        
+        param_names = param_info["params"]
+
+        # 如果没有提供参数范围，使用默认范围
+        if param_ranges is None:
+            param_ranges = {}
+            for param_name in param_names:
+                min_val, max_val = self._get_param_range(param_name, indicator_name)
+                param_ranges[param_name] = list(range(min_val, max_val + 1))
+
+        # 转换为遗传算法需要的格式
+        genetic_param_ranges = []
+        for param_name in param_names:
+            if param_name in param_ranges:
+                genetic_param_ranges.append((min(param_ranges[param_name]), max(param_ranges[param_name])))
+            else:
+                min_val, max_val = self._get_param_range(param_name, indicator_name)
+                genetic_param_ranges.append((min_val, max_val))
+
         # 初始化种群
-        population = toolbox.population(n=population_size)
-        
-        # 运行遗传算法
+        population = []
+        for _ in range(population_size):
+            individual = []
+            for min_val, max_val in genetic_param_ranges:
+                individual.append(random.randint(min_val, max_val))
+            population.append(individual)
+
         logger.info(f"开始遗传算法优化，种群大小: {population_size}, 代数: {generations}")
-        
+
         all_results = []
+
         for gen in range(generations):
-            # 评估种群
-            fitnesses = list(map(toolbox.evaluate, population))
-            for ind, fit in zip(population, fitnesses):
-                ind.fitness.values = fit
-            
-            # 记录当前代结果
-            for ind in population:
-                params = dict(zip(param_names, ind))
+            # 评估适应度
+            fitness_scores = []
+            for individual in population:
+                params = dict(zip(param_names, individual))
+                result = self._evaluate_parameters(df, indicator_name, params)
+                fitness = result.get(objective, 0)
+                fitness_scores.append(fitness)
+
+                # 记录结果
                 all_results.append({
                     'generation': gen,
-                    'parameters': params,
-                    objective: ind.fitness.values[0]
+                    'parameters': params.copy(),
+                    objective: fitness
                 })
-            
-            # 选择下一代
-            offspring = toolbox.select(population, len(population))
-            offspring = list(map(toolbox.clone, offspring))
-            
-            # 交叉和变异
-            for child1, child2 in zip(offspring[::2], offspring[1::2]):
-                if random.random() < cx_prob:
-                    toolbox.mate(child1, child2)
-                    del child1.fitness.values
-                    del child2.fitness.values
-            
-            for mutant in offspring:
-                if random.random() < mut_prob:
-                    toolbox.mutate(mutant)
-                    del mutant.fitness.values
-            
-            # 更新种群
-            population[:] = offspring
-        
-        # 找到最优个体
-        best_individual = tools.selBest(population, 1)[0]
-        best_params = dict(zip(param_names, best_individual))
-        
-        return best_params, pd.DataFrame(all_results)
+
+            # 选择（简化选择逻辑）
+            new_population = []
+            for _ in range(population_size):
+                if random.random() < 0.5:  # 50%概率选择现有个体
+                    # 选择适应度较高的个体
+                    if fitness_scores:
+                        # 找到非负的最大适应度
+                        valid_scores = [(i, score) for i, score in enumerate(fitness_scores) if score > 0]
+                        if valid_scores:
+                            # 按适应度排序，选择较好的
+                            valid_scores.sort(key=lambda x: x[1], reverse=True)
+                            # 选择前30%中的一个
+                            top_count = max(1, len(valid_scores) // 3)
+                            selected_idx = valid_scores[random.randint(0, top_count - 1)][0]
+                            selected = population[selected_idx].copy()
+                        else:
+                            # 所有适应度都<=0，随机选择
+                            selected_idx = random.randint(0, population_size - 1)
+                            selected = population[selected_idx].copy()
+                    else:
+                        # 随机生成新个体
+                        selected = []
+                        for min_val, max_val in genetic_param_ranges:
+                            selected.append(random.randint(min_val, max_val))
+                else:
+                    # 随机生成新个体
+                    selected = []
+                    for min_val, max_val in genetic_param_ranges:
+                        selected.append(random.randint(min_val, max_val))
+
+                # 变异
+                if random.random() < 0.3:  # 30%变异率
+                    for i in range(len(selected)):
+                        if random.random() < 0.2:  # 20%每个基因变异率
+                            min_val, max_val = genetic_param_ranges[i]
+                            selected[i] = random.randint(min_val, max_val)
+
+                new_population.append(selected)
+
+            population = new_population
+
+        # 找到最优解
+        best_fitness = -float('inf')
+        best_individual = None
+        for individual in population:
+            params = dict(zip(param_names, individual))
+            result = self._evaluate_parameters(df, indicator_name, params)
+            fitness = result.get(objective, 0)
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_individual = params
+
+        return best_individual or {}, pd.DataFrame(all_results)
     
     def _evaluate_individual(self, individual: list, df: pd.DataFrame, 
                            indicator_name: str, param_names: List[str],
@@ -308,6 +480,10 @@ class ParameterOptimizer:
         else:
             # 默认范围
             return 1, 100
+
+    def get_best_equity_curve(self) -> Optional[pd.DataFrame]:
+        """返回上次优化保存的最优权益曲线（DataFrame）或 None"""
+        return self._best_equity_curve
 
 # 测试函数
 if __name__ == "__main__":
